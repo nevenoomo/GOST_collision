@@ -39,7 +39,7 @@ impl MagmaKeySchedule {
 impl Iterator for MagmaKeySchedule {
     type Item = &MagmaRoundKey;
 
-    // DEBUG this might be the source of errors, because it is not clear, wich order to use 
+    // DEBUG this might be the source of errors, because it is not clear, which order to use.
     fn next(&mut self) -> Option<Self::Item> {
         let roundkey_num = match self.round_num { 
             0...23 => self.round_num & 0b111u8, // round_num mod 8
