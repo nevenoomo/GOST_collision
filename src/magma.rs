@@ -50,7 +50,7 @@ struct MagmaState {
 }
 
 /// A GOST block cipher. Works on 8 byte blocks. In this implementation the "byte" is 2 bits long
-struct Magma {
+pub struct Magma {
     key: MagmaKey,
     state: MagmaState,
 }
@@ -210,6 +210,10 @@ impl Magma {
         res
     }
 
+
+    /// Decrypt a single block of plaintext
+    /// # Panics
+    /// Panics if the length of the block is not 8 bytes.
     pub fn decrypt_block(&mut self, block: &[u8]) -> Block {
         assert_eq!(block.len(), 8, "Magma processes only 8 byte blocks");
 
