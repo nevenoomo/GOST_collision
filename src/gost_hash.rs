@@ -12,8 +12,8 @@ struct IntermediateKeys(Key, Key, Key, Key);
 #[derive(Default)]
 struct IntermediateState(SubState, SubState, SubState, SubState);
 
-struct GostHash {
-    state: State,
+pub struct GostHash {
+    _state: State,
 }
 
 fn xor(x: &[u8], y: &[u8]) -> Vec<u8> {
@@ -42,7 +42,7 @@ impl IntermediateState {
 
 impl GostHash {
     pub fn new() -> GostHash {
-        GostHash { state: [0u8; 32] }
+        GostHash { _state: [0u8; 32] }
     }
 
     /// Gost compression function.
@@ -108,6 +108,17 @@ impl GostHash {
         k
     }
 
+    pub fn p_rev(k: &[u8]) -> State {
+        assert_eq!(k.len(), 32, "Key for p_rev must be of 32 bytes");
+        let mut x = [0u8; 32];
+
+        for i in 1..32 {
+            x[Self::phi(i) - 1] = k[i - 1];
+        }
+
+        x
+    }
+
     // phi(i + 1 + 4*(k-1)) = 8*i + k, i=0..3, k=1..8
     fn phi(x: usize) -> usize {
         let k = ((x - 1) >> 2) + 1; // == (x-1)/4 + 1
@@ -151,16 +162,16 @@ impl GostHash {
         s
     }
 
-    fn psy_pow(x: &[u8], n: i32) -> State {
+    pub fn psy_pow(x: &[u8], n: i32) -> State {
         let mut tmp = [0u8; 32];
         (&mut tmp[..]).copy_from_slice(x);
 
         if n >= 0 {
-            for i in 0..n {
+            for _ in 0..n {
                 tmp = Self::psy(&tmp);
             }
         } else {
-            for i in 0..(-n) {
+            for _ in 0..(-n) {
                 tmp = Self::psy_rev(&tmp);
             }
         }
@@ -169,7 +180,7 @@ impl GostHash {
     }
 
     fn output_transformation(s: &[u8], h: &[u8], m: &[u8]) -> State {
-        let mut res = [0u8; 32];
+        let mut res;
 
         // h_i = psy^61(h_i-1 xor psy(m xor psy^12(s)))
         res = Self::psy_pow(s, 12);
@@ -177,7 +188,8 @@ impl GostHash {
         let tmp = xor(h, &res);
         res.copy_from_slice(tmp.as_slice());
         res = Self::psy_pow(&res, 61);
-        res
+
+        res 
     }
 }
 
@@ -194,6 +206,13 @@ mod test {
             3, 0, 1,
         ];
 
-        let res = super::GostHash::compress(&h, &m);
+        super::GostHash::compress(&h, &m);
+    }
+
+    #[test]
+    fn phi_print() {
+        for i in 1..33 {
+            println!("{}", super::GostHash::phi(i));
+        }
     }
 }

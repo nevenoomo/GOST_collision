@@ -6,7 +6,6 @@ static SBOX: [u8; 4] = [1, 3, 0, 2];
 
 type HalfBlock = [u8; 4];
 type Block = [u8; 8];
-type MagmaRoundKey = [u8; 4];
 
 macro_rules! half_blk_le {
     ($x:expr) => {{
@@ -62,7 +61,7 @@ pub mod utils {
 
         let len = x.len();
         let mut c = 0; //carry
-        let mut tmp = 0;
+        let mut tmp;
 
         for i in 0..len {
             tmp = x[i] + y[i] + c;
@@ -243,8 +242,13 @@ impl Magma {
         res
     }
 
-    fn round(left: &mut HalfBlock, right: &mut HalfBlock, key: &[u8]) {
-        let mut tmp = right.clone();
+    pub fn round(left: &mut [u8], right: &mut [u8], key: &[u8]) {
+        assert_eq!(left.len(), 4);
+        assert_eq!(right.len(), 4);
+
+        let mut tmp = [0u8; 4];
+        (&mut tmp).copy_from_slice(right);
+        
         utils::sum_mod(&mut tmp, key);
         utils::s_box(&mut tmp);
         utils::rot11(&mut tmp);
