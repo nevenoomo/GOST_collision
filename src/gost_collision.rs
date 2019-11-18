@@ -63,6 +63,7 @@ struct GostAttackContext {
 
 pub struct GostAttack {
     ctx: Box<GostAttackContext>,
+    operator_on_base_vectors: Arc<[[u8; 8]; 64]>,
 }
 
 impl GostAttack {
@@ -77,6 +78,7 @@ impl GostAttack {
                 d: Box::new([0u8; 8]),
                 fixed_points: Arc::new(RwLock::new(HashSet::new())),
             }),
+            operator_on_base_vectors: Arc::new(Self::get_operator_values()),
         };
 
         res.calculate_d();
@@ -96,8 +98,9 @@ impl GostAttack {
 
     fn fill_rnd(c: &mut [u8]) {
         let mut rnd_gen = rand::thread_rng();
-        let rnd = rnd_gen.gen::<u16>();
-        le_to_blk!(c, rnd);
+        for i in c.iter_mut() {
+            *i = rnd_gen.gen_range(0, 4);
+        }
     }
 
     fn calculate_d(&mut self) {
@@ -117,8 +120,8 @@ impl GostAttack {
         let pb = ProgressBar::new(16777216);
         pb.set_style(
             ProgressStyle::default_bar()
-            .template("[{bar:50.green/green}] {pos}/{len} {msg}")
-            .progress_chars("#>-"),
+                .template("[{bar:50.green/green}] {pos}/{len} {msg}")
+                .progress_chars("#>-"),
         );
         pb.set_message("Fixed Points");
 
@@ -161,6 +164,7 @@ impl GostAttack {
             let d1 = d1_arc.clone();
             let h = self.ctx.h.clone();
             let pb = pb.clone();
+            let b = self.operator_on_base_vectors.clone();
 
             // UGLY should write it into a separate function
             seekers.push(thread::spawn(move || {
@@ -177,7 +181,7 @@ impl GostAttack {
                     le_to_blk!(half_key, half_key_num);
                     pb.inc(1);
 
-                    if Self::check_equasion(&half_key, &(*d1), true) {
+                    if Self::check_equasion(b.clone(), &half_key, &(*d1), true) {
                         let mut block = [0u8; 8];
                         let mut left = [0u8; 4];
                         let mut right = [0u8; 4];
@@ -227,6 +231,7 @@ impl GostAttack {
             let fixed_points = self.ctx.fixed_points.clone();
             let l_copy = l.clone();
             let pb = pb.clone();
+            let b = self.operator_on_base_vectors.clone();
 
             seekers.push(thread::spawn(move || {
                 // sk4 .. sk7
@@ -243,7 +248,7 @@ impl GostAttack {
                     le_to_blk!(half_key, half_key_num);
                     pb.inc(1);
 
-                    if Self::check_equasion(&half_key, &(*d2), false) {
+                    if Self::check_equasion(b.clone(), &half_key, &(*d2), false) {
                         let mut block = [0u8; 8];
                         let mut left = [0u8; 4];
                         let mut right = [0u8; 4];
@@ -297,7 +302,7 @@ impl GostAttack {
     /// Check, whether equasion A_i * k = d_i holds for a given k, d_i and i
     /// if first_half is true, then equasion for A_1 is computed
     /// else equasion for A_2 is computed
-    fn check_equasion(half_key: &[u8], d: &[u8], first_half: bool) -> bool {
+    fn check_equasion(b: Arc<[[u8; 8]; 64]>, half_key: &[u8], d: &[u8], first_half: bool) -> bool {
         let mut mock_key = [0u8; 32];
         if first_half {
             (&mut mock_key[..16]).copy_from_slice(half_key);
@@ -305,10 +310,10 @@ impl GostAttack {
             (&mut mock_key[16..]).copy_from_slice(half_key);
         }
 
-        (&Self::apply_operator(&mock_key)) == d
+        (&Self::apply_operator(b, &mock_key)) == d
     }
 
-    fn apply_operator(k0: &[u8]) -> [u8; 8] {
+    fn _apply_operator(k0: &[u8]) -> [u8; 8] {
         assert_eq!(k0.len(), 32, "apply_operator argument must be of 32 bytes");
 
         let ret_tmp = gost_hash::GostHash::psy_pow(&gost_hash::GostHash::p_rev(k0), -12);
@@ -336,5 +341,54 @@ impl GostAttack {
             }
         }
         None
+    }
+
+    fn get_operator_values() -> [[u8; 8]; 64] {
+        let mut ret = [[0u8; 8]; 64];
+        let mut blk = [0u8; 32];
+        let mut n = 1u64;
+
+        for a in (&mut ret).iter_mut() {
+            le_to_blk!(blk, n);
+            *a = Self::_apply_operator(&blk);
+            n <<= 1;
+        }
+
+        ret
+    }
+
+    fn apply_operator(b: Arc<[[u8; 8]; 64]>, k: &[u8]) -> [u8; 8] {
+        let mut acc = [0u8; 8];
+        let mut i = 0;
+        for v in k.iter() {
+            if (v & 0b1) != 0 {
+                magma::utils::xor(&mut acc, &b[i]);
+            }
+            if (v & 0b10) != 0 {
+                magma::utils::xor(&mut acc, &b[i + 1]);
+            }
+            i += 2;
+        }
+
+        acc
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::sync::Arc;
+
+    #[test]
+    fn operator_application_methods() {
+        let a = Arc::new(super::GostAttack::get_operator_values());
+        let mut k = [0u8; 32];
+
+        for _ in 0..1280 {
+            super::GostAttack::fill_rnd(&mut k);
+            assert_eq!(
+                super::GostAttack::_apply_operator(&k),
+                super::GostAttack::apply_operator(a.clone(), &k)
+            );
+        }
     }
 }

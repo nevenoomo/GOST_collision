@@ -81,7 +81,7 @@ pub mod utils {
 
     pub fn rot11(x: &mut [u8]) {
         assert_eq!(x.len(), 4, "Rotation works only for half-block");
-        let rotated = half_blk_le!(x).rotate_left(11);
+        let rotated = half_blk_le!(x).rotate_left(3);
 
         le_to_half_blk!(x, rotated);
     }
