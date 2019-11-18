@@ -3,13 +3,13 @@
 //! This works with the constraint that one "byte" is 2 bits long.
 use crate::gost_hash;
 use crate::magma;
-use indicatif::{MultiProgress, ProgressBar};
+use indicatif::{ProgressBar, ProgressStyle};
 use rand::Rng;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::thread;
 
-static SEEKERS: u32 = 8;
+static SEEKERS: u32 = 4;
 
 pub mod utils {
     use std::convert::TryInto;
@@ -86,7 +86,6 @@ impl GostAttack {
 
     pub fn generate_collision(&mut self) -> ([u8; 32], [u8; 32]) {
         loop {
-            println!("Generating collision"); // DEBUG
             self.find_fixed_points();
             if let Some(collision) = self.get_collision() {
                 return collision;
@@ -114,16 +113,23 @@ impl GostAttack {
     }
 
     fn find_fixed_points(&mut self) {
-        println!("Finding fixed points"); // DEBUG
         let mut i = 0;
+        let pb = ProgressBar::new(16777216);
+        pb.set_style(
+            ProgressStyle::default_bar()
+            .template("[{bar:50.green/green}] {pos}/{len} {msg}")
+            .progress_chars("#>-"),
+        );
+        pb.set_message("Fixed Points");
 
         while self.ctx.fixed_points.read().unwrap().len() < 16777216 {
             // (2^24)
-            println!("Round {}", i); // DEBUG
+            pb.set_position(self.ctx.fixed_points.read().unwrap().len() as u64);
             self.find_fixed_points_round(i);
             i += 1;
         }
-        println!("Fixed points found"); // DEBUG
+
+        pb.finish_and_clear();
     }
 
     fn find_fixed_points_round(&mut self, i: usize) {
@@ -142,11 +148,19 @@ impl GostAttack {
         let mut d1_tmp = [0u8; 8];
         (&mut d1_tmp).copy_from_slice(d1);
         let d1_arc = Arc::new(d1_tmp);
+        let pb = ProgressBar::new(std::u32::MAX as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] [{bar:50.cyan/blue}] {pos}/{len} {msg}")
+                .progress_chars("#>-"),
+        );
+        pb.set_message("Keys probed");
 
         for i in 0..SEEKERS {
             let l_copy = l.clone();
             let d1 = d1_arc.clone();
             let h = self.ctx.h.clone();
+            let pb = pb.clone();
 
             // UGLY should write it into a separate function
             seekers.push(thread::spawn(move || {
@@ -161,7 +175,9 @@ impl GostAttack {
 
                 for half_key_num in first..second {
                     le_to_blk!(half_key, half_key_num);
-                    if !Self::check_equasion(&half_key, &(*d1), true) {
+                    pb.inc(1);
+
+                    if Self::check_equasion(&half_key, &(*d1), true) {
                         let mut block = [0u8; 8];
                         let mut left = [0u8; 4];
                         let mut right = [0u8; 4];
@@ -187,6 +203,8 @@ impl GostAttack {
             hnd.join().unwrap();
         }
 
+        pb.finish_and_clear();
+
         l
     }
 
@@ -195,12 +213,20 @@ impl GostAttack {
         let mut d2_tmp = [0u8; 8];
         (&mut d2_tmp).copy_from_slice(d2);
         let d2_arc = Arc::new(d2_tmp);
+        let pb = ProgressBar::new(std::u32::MAX as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] [{bar:50.cyan/blue}] {pos}/{len} {msg}")
+                .progress_chars("#>-"),
+        );
+        pb.set_message("Keys probed backwards");
 
         for i in 0..SEEKERS {
             let h = self.ctx.h.clone();
             let d2 = d2_arc.clone();
             let fixed_points = self.ctx.fixed_points.clone();
             let l_copy = l.clone();
+            let pb = pb.clone();
 
             seekers.push(thread::spawn(move || {
                 // sk4 .. sk7
@@ -215,8 +241,9 @@ impl GostAttack {
 
                 for half_key_num in first..second {
                     le_to_blk!(half_key, half_key_num);
+                    pb.inc(1);
 
-                    if !Self::check_equasion(&half_key, &(*d2), false) {
+                    if Self::check_equasion(&half_key, &(*d2), false) {
                         let mut block = [0u8; 8];
                         let mut left = [0u8; 4];
                         let mut right = [0u8; 4];
@@ -256,6 +283,8 @@ impl GostAttack {
         for hnd in seekers {
             hnd.join().unwrap();
         }
+
+        pb.finish_and_clear();
     }
 
     fn convert_to_message(h: &[u8], key: &[u8]) -> [u8; 32] {
@@ -290,7 +319,6 @@ impl GostAttack {
     }
 
     fn get_collision(&self) -> Option<([u8; 32], [u8; 32])> {
-        println!("Finding collision in fixed points"); // DEBUG
         let mut m1 = [0u8; 32];
         let mut m2 = [0u8; 32];
         let read_lock = self.ctx.fixed_points.read().unwrap();
