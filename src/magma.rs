@@ -4,38 +4,13 @@
 
 static SBOX: [u8; 4] = [1, 3, 0, 2];
 
-type HalfBlock = [u8; 4];
-type Block = [u8; 8];
-
-macro_rules! half_blk_le {
-    ($x:expr) => {{
-        // Here we use the fact that our "byte" is only 2 bits in size
-        // thus 4 elements take 8 bits => it can be packed in a u8.
-        // IDEA This may be then reimplemented to use 64 bit values as in a standard
-
-        let mut tmp = 0u8;
-        let mut offset = 0u8;
-        for e in $x.iter() {
-            tmp |= *e << offset;
-            offset += 2;
-        }
-
-        tmp
-    }};
-}
-
-macro_rules! le_to_half_blk {
-    ($x:expr, $n:expr) => {{
-        let mut offset = 0;
-        for i in 0..$x.len() {
-            $x[i] = ($n >> offset) & 0b11;
-            offset += 2;
-        }
-    }};
-}
+type HalfBlock = u8;
+type Block = u16;
+type Key = u64;
+type RoundKey = u8;
 
 struct MagmaKey {
-    key: [u8; 32],
+    key: Key,
 }
 
 struct MagmaKeyScheduler<'a> {
@@ -55,53 +30,22 @@ pub struct Magma {
 }
 
 pub mod utils {
-    // NOTE It is assumed that the array is LE value => carry goes to the greater indexes
-    pub fn sum_mod(x: &mut [u8], y: &[u8]) {
-        assert_eq!(x.len(), y.len(), "Sum operands must be of the same size");
+    use super::*;
 
-        let len = x.len();
-        let mut c = 0; //carry
-        let mut tmp;
-
-        for i in 0..len {
-            tmp = x[i] + y[i] + c;
-            x[i] = tmp & 0b11; // take the least two bits. Equal to mod 4
-            c = tmp >> 2; // everything else is carry
-        }
-        // mod part is automatic as we are ignoring the carry value in the last iteration
-    }
-
-    pub fn s_box(x: &mut [u8]) {
-        assert_eq!(x.len(), 4, "");
-
+    pub fn s_box(x: HalfBlock) -> HalfBlock {
+        let mut ret = 0;
         for i in 0..4 {
-            x[i] = super::SBOX[x[i] as usize];
+            let twice = i << 1;
+            ret |= SBOX[((x >> twice) & 0b11) as usize] << twice;
         }
-    }
 
-    pub fn rot11(x: &mut [u8]) {
-        assert_eq!(x.len(), 4, "Rotation works only for half-block");
-        let rotated = half_blk_le!(x).rotate_left(3);
-
-        le_to_half_blk!(x, rotated);
-    }
-
-    pub fn xor(x: &mut [u8], y: &[u8]) {
-        assert_eq!(x.len(), y.len(), "XOR operands must be of the same size.");
-
-        for i in 0..x.len() {
-            x[i] ^= y[i];
-        }
+        ret
     }
 }
 
 impl<'a> MagmaKey {
-    fn new(key: &[u8]) -> MagmaKey {
-        assert_eq!(key.len(), 32, "Magma key must be of 32 bytes.");
-        let mut key_copy = [0u8; 32];
-        (&mut key_copy[..]).copy_from_slice(key);
-
-        MagmaKey { key: key_copy }
+    fn new(key: u64) -> MagmaKey {
+        MagmaKey { key }
     }
 
     fn scheduler(&'a self) -> MagmaKeyScheduler<'a> {
@@ -119,49 +63,51 @@ impl<'a> MagmaKeyScheduler<'a> {
 }
 
 impl<'a> Iterator for MagmaKeyScheduler<'a> {
-    type Item = &'a [u8];
+    type Item = HalfBlock;
 
     //NOTE here the order might be broken. Try reordering hands of main
     fn next(&mut self) -> Option<Self::Item> {
-        self.round_num += 1;
-
-        match self.round_num {
+        let res = match self.round_num {
             1..=24 => Some(
-                &self.magma_key.key
-                    [4 * (self.round_num - 1 & 0b111)..4 * ((self.round_num - 1 & 0b111) + 1)],
+                // (key >> ((round_num % 8) * 8))
+                (self.magma_key.key >> ((self.round_num & 0b111) << 3)) as u8,
             ),
             25..=32 => Some(
-                &self.magma_key.key[4 * (7 - (self.round_num - 1 & 0b111))
-                    ..4 * (8 - (self.round_num - 1 & 0b111))],
+                // reverse
+                (self.magma_key.key >> ((7 - (self.round_num & 0b111)) << 3)) as u8,
             ),
-            _ => return None,
-        }
+            _ => None,
+        };
+
+        self.round_num += 1;
+
+        res
     }
 }
 
 impl<'a> DoubleEndedIterator for MagmaKeyScheduler<'a> {
     fn next_back(&mut self) -> Option<Self::Item> {
+        let res = match self.round_num {
+            1..=8 => Some(
+                ((self.magma_key.key >> (7 - (self.round_num & 0b111)) << 3) & 0b11111111) as u8,
+            ),
+            9..=32 => {
+                Some(((self.magma_key.key >> (self.round_num & 0b111) << 3) & 0b11111111) as u8)
+            }
+            _ => return None,
+        };
+
         self.round_num += 1;
 
-        match self.round_num {
-            1..=8 => Some(
-                &self.magma_key.key
-                    [4 * (self.round_num - 1 & 0b111)..4 * ((self.round_num - 1 & 0b111) + 1)],
-            ),
-            9..=32 => Some(
-                &self.magma_key.key[4 * (7 - (self.round_num - 1 & 0b111))
-                    ..4 * (8 - (self.round_num - 1 & 0b111))],
-            ),
-            _ => return None,
-        }
+        res
     }
 }
 
 impl MagmaState {
     fn new() -> MagmaState {
         MagmaState {
-            left: [0u8; 4],
-            right: [0u8; 4],
+            left: 0u8,
+            right: 0u8,
         }
     }
 }
@@ -170,7 +116,7 @@ impl Magma {
     /// Returns a new instance of a block cipher. Takes a key as an input.
     /// # Panics
     /// Panicks if the length of the key is not 32.
-    pub fn new(key: &[u8]) -> Magma {
+    pub fn new(key: u64) -> Magma {
         let key = MagmaKey::new(key);
         let state = MagmaState::new();
 
@@ -183,76 +129,45 @@ impl Magma {
     /// Encrypt a single block of plaintext
     /// # Panics
     /// Panics if the length of the block is not 8 bytes.
-    pub fn encrypt_block(&mut self, block: &[u8]) -> Block {
-        assert_eq!(block.len(), 8, "Magma processes only 8 byte blocks");
+    pub fn encrypt_block(&mut self, block: Block) -> Block {
+        self.state.left = (block & 0xff) as u8;
+        self.state.right = ((block & 0xff00) >> 8) as u8;
 
-        //NOTE this might be an error. Try switching parts of a block.
-        (&mut self.state.left[..]).copy_from_slice(&block[..4]);
-        (&mut self.state.right[..]).copy_from_slice(&block[4..]);
-
-        let mut res = [0u8; 8];
         let key_scheduler = self.key.scheduler();
-        let mut left = &mut self.state.left;
-        let mut right = &mut self.state.right;
+        let left = &mut self.state.left;
+        let right = &mut self.state.right;
 
         for round_key in key_scheduler {
             Self::round(left, right, round_key);
-
-            // End of the round of Feistel network: swap to halves
-            let tmp = left;
-            left = right;
-            right = tmp;
         }
 
-        // We write this way to undo the swapping in the last round, as it should not be there
-        (&mut res[..4]).copy_from_slice(right);
-        (&mut res[4..]).copy_from_slice(left);
-
-        res
+        ((*left as u16) << 8) | (*right as u16)
     }
 
     /// Decrypt a single block of plaintext
     /// # Panics
     /// Panics if the length of the block is not 8 bytes.
-    pub fn decrypt_block(&mut self, block: &[u8]) -> Block {
-        assert_eq!(block.len(), 8, "Magma processes only 8 byte blocks");
+    pub fn decrypt_block(&mut self, block: Block) -> Block {
+        self.state.left = (block & 0xff) as u8;
+        self.state.right = ((block & 0xff00) >> 8) as u8;
 
-        //NOTE this might be an error. Try switching parts of a block.
-        (&mut self.state.left[..]).copy_from_slice(&block[..4]);
-        (&mut self.state.right[..]).copy_from_slice(&block[4..]);
-
-        let mut res = [0u8; 8];
         let key_scheduler = self.key.scheduler().rev();
-        let mut left = &mut self.state.left;
-        let mut right = &mut self.state.right;
+        let left = &mut self.state.left;
+        let right = &mut self.state.right;
 
         for round_key in key_scheduler {
             Self::round(left, right, round_key);
-
-            // End of the round of Feistel network: swap to halves
-            let tmp = left;
-            left = right;
-            right = tmp;
         }
 
-        // We write this way to undo the swapping in the last round, as it should not be there
-        (&mut res[..4]).copy_from_slice(right);
-        (&mut res[4..]).copy_from_slice(left);
-
-        res
+        // This order undos swaping on the last round
+        ((*left as u16) << 8) | (*right as u16)
     }
 
-    pub fn round(left: &mut [u8], right: &mut [u8], key: &[u8]) {
-        assert_eq!(left.len(), 4);
-        assert_eq!(right.len(), 4);
-
-        let mut tmp = [0u8; 4];
-        (&mut tmp).copy_from_slice(right);
-        
-        utils::sum_mod(&mut tmp, key);
-        utils::s_box(&mut tmp);
-        utils::rot11(&mut tmp);
-        utils::xor(left, &tmp);
+    /// *Left* is lower bytes
+    /// *Right* is upper bytes 
+    pub fn round(left: &mut HalfBlock, right: &mut HalfBlock, key: RoundKey) {
+        *left ^= utils::s_box(right.wrapping_add(key)).rotate_left(3); 
+        std::mem::swap(left, right);
     }
 }
 
@@ -260,158 +175,61 @@ impl Magma {
 mod test {
     #[test]
     fn ecryption_decryption_test() {
-        let key = [
-            0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 3,
-            2, 1, 0,
-        ];
-        let block = [1, 2, 3, 0, 0, 1, 3, 2];
+        let key = 0b0001101100011011000110110001101100011011000110110001101111100100;
+        let block = 0b0110110000011110;
 
-        let mut magma = super::Magma::new(&key);
-        let ecrypted = magma.encrypt_block(&block);
+        let mut magma = super::Magma::new(key);
+        let ecrypted = magma.encrypt_block(block);
 
-        let decrypted = magma.decrypt_block(&ecrypted);
+        let decrypted = magma.decrypt_block(ecrypted);
 
         assert_eq!(
-            &block, &decrypted,
+            block, decrypted,
             "Initial and decrypted blocks does not match."
         );
     }
 
     #[test]
     fn key_schedule_test() {
-        let key = super::MagmaKey::new(&[
-            0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 3,
-            2, 1, 0,
-        ]);
+        let key = super::MagmaKey::new(0b0001101100011011000110110001101100011011000110110001101111100100);
         let expected = [
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [3, 2, 1, 0],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [3, 2, 1, 0],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [3, 2, 1, 0],
-            [3, 2, 1, 0],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
+            0b11100100, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011,
+            0b11100100, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011,
+            0b11100100, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011,
+            0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b11100100,
         ];
 
         let key_schedule = super::MagmaKeyScheduler::new(&key);
 
         for (i, roundkey) in key_schedule.enumerate() {
-            assert_eq!(roundkey, &(expected[i]), "Key schedule is broken");
+            assert_eq!(roundkey, expected[i], "Key schedule is broken");
         }
     }
 
     #[test]
     fn key_schedule_rev_test() {
-        let key = super::MagmaKey::new(&[
-            0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 3,
-            2, 1, 0,
-        ]);
+        let key = super::MagmaKey::new(0b0001101100011011000110110001101100011011000110110001101111100100);
         let expected = [
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [3, 2, 1, 0],
-            [3, 2, 1, 0],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [3, 2, 1, 0],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [3, 2, 1, 0],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
+            0b11100100, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011,
+            0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b11100100,
+            0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b11100100,
+            0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b00011011, 0b11100100,
         ];
 
         let key_schedule = super::MagmaKeyScheduler::new(&key).rev();
 
         for (i, roundkey) in key_schedule.enumerate() {
-            assert_eq!(roundkey, &(expected[i]), "Key schedule is broken");
+            assert_eq!(roundkey, expected[i], "Key schedule is broken");
         }
     }
 
     #[test]
-    fn sum_mod_test() {
-        let mut x = [3u8, 1u8];
-        let y = [1u8, 3u8];
-        let expected = [0u8, 1u8];
-
-        super::utils::sum_mod(&mut x, &y);
-
-        assert_eq!(&x, &expected, "Sum_mod is not working");
-    }
-
-    #[test]
     fn sbox_test() {
-        let mut x = [0, 1, 2, 3];
-        let expected = [1, 3, 0, 2];
+        let x = 0b00011011;
+        let expected = 0b01110010;
 
-        super::utils::s_box(&mut x);
+        let res = super::utils::s_box(x);
 
-        assert_eq!(&x, &expected, "SBOX transformation does not work.");
-    }
-
-    #[test]
-    fn rot11_test() {
-        let mut x = [0b11, 0b10, 0b01, 0b00];
-        let expected = [0b00, 0b10, 0b01, 0b11];
-
-        super::utils::rot11(&mut x);
-
-        assert_eq!(&x, &expected, "Rotation does not work.");
-    }
-
-    #[test]
-    fn xor_test() {
-        let mut x = [0b11, 0b10, 0b01, 0b00];
-        let y = [0b11, 0b00, 0b10, 0b01];
-        let expected = [0b00, 0b10, 0b11, 0b01];
-
-        super::utils::xor(&mut x, &y);
-
-        assert_eq!(&x, &expected, "XOR does not work.");
+        assert_eq!(res, expected, "SBOX transformation does not work.");
     }
 }

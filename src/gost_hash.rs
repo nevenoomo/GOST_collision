@@ -2,13 +2,14 @@
 //! This module implements a GOST hash function with a constraint that the one "byte" consists of 2 bits.
 use crate::magma::Magma;
 
-type Block = [u8; 8];
-type State = [u8; 32];
+type Block = u16;
+type State = u64;
 type Key = State;
 type SubState = Block;
 
 #[derive(Default)]
 struct IntermediateKeys(Key, Key, Key, Key);
+
 #[derive(Default)]
 struct IntermediateState(SubState, SubState, SubState, SubState);
 
@@ -16,104 +17,90 @@ pub struct GostHash {
     _state: State,
 }
 
-fn xor(x: &[u8], y: &[u8]) -> Vec<u8> {
-    assert_eq!(x.len(), y.len(), "XOR operands must be of the same size.");
-    let mut res = x.to_vec();
-
-    for i in 0..x.len() {
-        res[i] ^= y[i];
-    }
-
-    res
-}
-
 impl IntermediateState {
     fn to_state(&self) -> State {
         let mut s: State = Default::default();
 
-        (&mut s[..8]).copy_from_slice(&self.0);
-        (&mut s[8..16]).copy_from_slice(&self.1);
-        (&mut s[16..24]).copy_from_slice(&self.2);
-        (&mut s[24..32]).copy_from_slice(&self.3);
+        s |= self.0 as State;
+        s |= (self.1 as State) << 16;
+        s |= (self.2 as State) << 32;
+        s |= (self.3 as State) << 48;
 
         s
+    }
+
+    fn from_state(&mut self, s: State){
+        self.0 = s as SubState;
+        self.1 = (s >> 16) as SubState;
+        self.2 = (s >> 32) as SubState;
+        self.3 = (s >> 48) as SubState;
     }
 }
 
 impl GostHash {
     pub fn new() -> GostHash {
-        GostHash { _state: [0u8; 32] }
+        GostHash { _state: 0 }
     }
 
     /// Gost compression function.
     /// **Takes** a state and a message block as input and **returns** the next state. Both are of size 32 bytes.
-    pub fn compress(h: &State, m: &State) -> State {
+    pub fn compress(h: State, m: State) -> State {
         let k = Self::key_gen(h, m);
         let mut s: IntermediateState = Default::default();
-        (&mut s.0).copy_from_slice(&h[..8]);
-        (&mut s.1).copy_from_slice(&h[8..16]);
-        (&mut s.2).copy_from_slice(&h[16..24]);
-        (&mut s.3).copy_from_slice(&h[24..32]);
 
-        s.0 = Magma::new(&k.0).encrypt_block(&s.0);
-        s.1 = Magma::new(&k.1).encrypt_block(&s.1);
-        s.2 = Magma::new(&k.2).encrypt_block(&s.2);
-        s.3 = Magma::new(&k.3).encrypt_block(&s.3);
+        s.from_state(h);
+        
+        s.0 = Magma::new(k.0).encrypt_block(s.0);
+        s.1 = Magma::new(k.1).encrypt_block(s.1);
+        s.2 = Magma::new(k.2).encrypt_block(s.2);
+        s.3 = Magma::new(k.3).encrypt_block(s.3);
 
-        Self::output_transformation(&s.to_state(), h, m)
+        Self::output_transformation(s.to_state(), h, m)
     }
 
-    fn key_gen(h: &State, m: &State) -> IntermediateKeys {
-        let c = [
-            0x00, 0x03, 0x00, 0x03, 0x00, 0x03, 0x00, 0x03, 0x03, 0x00, 0x03, 0x00, 0x03, 0x00,
-            0x03, 0x00, 0x00, 0x03, 0x03, 0x00, 0x03, 0x00, 0x00, 0x03, 0x03, 0x00, 0x00, 0x00,
-            0x03, 0x03, 0x00, 0x03,
-        ];
-        let mut cur_h: &[u8] = h;
-        let mut cur_m: &[u8] = m;
+    fn key_gen(h: State, m: State) -> IntermediateKeys {
+        let c = 0b1100111100000011110000110011110000110011001100111100110011001100;
+        let mut cur_h = h;
+        let mut cur_m = m;
 
         // Step 1. Here c == 0
-        let k0 = Self::p(xor(cur_h, cur_m).as_slice());
+        let k0 = Self::p(cur_h ^ cur_m);
 
         // Step 2. Here c == 0
-        let tmp1 = Self::a(cur_h);
-        let tmp2 = Self::a(&Self::a(cur_m)[..]);
-        cur_h = &tmp1;
-        cur_m = &tmp2;
-        let k1 = Self::p(xor(cur_h, cur_m).as_slice());
+        cur_h = Self::a(cur_h);
+        cur_m = Self::a(Self::a(cur_m));
+        let k1 = Self::p(cur_h ^ cur_m);
 
         // Step 3. Here c == that thig on top (0xff -> 0x03 as we have only 2 bits)
-        let tmp1 = xor(&Self::a(cur_h), &c);
-        let tmp2 = Self::a(&Self::a(cur_m)[..]);
-        cur_h = tmp1.as_slice();
-        cur_m = &tmp2;
-        let k2 = Self::p(xor(cur_h, cur_m).as_slice());
+        cur_h = Self::a(cur_h) ^ c;
+        cur_m = Self::a(Self::a(cur_m));
+        let k2 = Self::p(cur_h ^ cur_m);
+
         // Step 4. Here c == 0
-        let tmp1 = Self::a(cur_h);
-        let tmp2 = Self::a(&Self::a(cur_m));
-        cur_h = &tmp1;
-        cur_m = &tmp2;
-        let k3 = Self::p(xor(cur_h, cur_m).as_slice());
+        cur_h = Self::a(cur_h);
+        cur_m = Self::a(Self::a(cur_m));
+        let k3 = Self::p(cur_h ^ cur_m);
 
         IntermediateKeys(k0, k1, k2, k3)
     }
 
-    fn p(x: &[u8]) -> Key {
-        let mut k: Key = [0u8; 32];
+    fn p(x: State) -> Key {
+        let mut k = 0;
 
         for i in 1..32 {
-            k[i - 1] = x[Self::phi(i) - 1];
+            // k[i - 1] = x[phi(i) - 1]
+            k |= ((x >> ((Self::phi(i)-1) << 1)) & 0b11) << ((i-1) << 1);
         }
 
         k
     }
 
-    pub fn p_rev(k: &[u8]) -> State {
-        assert_eq!(k.len(), 32, "Key for p_rev must be of 32 bytes");
-        let mut x = [0u8; 32];
+    pub fn p_rev(k: Key) -> State {
+        let mut x = 0;
 
         for i in 1..32 {
-            x[Self::phi(i) - 1] = k[i - 1];
+           // x[phi(i) - 1] = k[i - 1];
+           x |= ((k >> ((i-1) << 1)) & 0b11) << ((Self::phi(i)-1) << 1);
         }
 
         x
@@ -127,92 +114,57 @@ impl GostHash {
         8 * i + k
     }
 
-    fn a(x: &[u8]) -> State {
-        let mut s: State = [0u8; 32];
-        (&mut s[..24]).copy_from_slice(&x[8..]); // y2 || y3 || y4
-        (&mut s[24..]).copy_from_slice(xor(&x[..8], &x[8..16]).as_slice()); // (y1 xor y2)
+    fn a(x: State) -> State {
+        // x = y4 || y3 || y2 || y1
+        let mut s: State = Default::default();
+
+        s |= x >> 16; // y4 || y3 || y2
+        s |= ((x & 0xffff) ^ (s & 0xffff)) << 48; // (y1 xor y2) || y4 || y3 || y2
 
         s
     }
 
-    fn psy(x: &[u8]) -> State {
-        let mut s: State = [0u8; 32];
-        (&mut s[..30]).copy_from_slice(&x[2..]); // gamma1 || gamma2 || gamma3 || gamma4 || .. || gamma15
-        let mut tmp = xor(&x[..2], &x[2..4]); // gamma0 xor gamma1
-        tmp = xor(tmp.as_slice(), &x[4..6]); // gamma0 xor gamma1 xor gamma2
-        tmp = xor(tmp.as_slice(), &x[6..8]); // gamma0 xor gamma1 xor gamma2 xor gamma3
-        tmp = xor(tmp.as_slice(), &x[24..26]); // gamma0 xor gamma1 xor gamma2 xor gamma3 xor gamma12
-        tmp = xor(tmp.as_slice(), &x[30..32]); // gamma0 xor gamma1 xor gamma2 xor gamma3 xor gamma12 xor gamma15
-        (&mut s[30..]).copy_from_slice(tmp.as_slice());
+    fn psy(x: State) -> State {
+        let mut s: State = Default::default(); 
 
+        s |= x >> 4; // ? || gamma15 || .. || gamma1 
+        // gamma0 ^ gamma1 ^ gamma2 ^ gamma3 ^ gamma12 ^ gamma15
+        let acc = (x & 0xf) ^ ((x >> 4) & 0xf) ^ ((x >> 8) & 0xf) ^ ((x >> 12) & 0xf) ^ ((x >> 48) & 0xf) ^ ((x >> 60) & 0xf); 
+        s |= acc << 60; // (XOR) || gamma15 || .. || gamma1 
+        
         s
     }
 
-    fn psy_rev(x: &[u8]) -> State {
-        let mut s: State = [0u8; 32];
+    fn psy_rev(x: State) -> State {
+        let mut s: State = Default::default();
 
-        (&mut s[2..]).copy_from_slice(&x[..30]); // gamma1 || gamma2 || gamma3 || gamma4 || .. || gamma15
-        let mut tmp = xor(&x[30..], &s[30..]); // (gamma0 xor gamma1 xor gamma2 xor gamma3 xor gamma12 xor gamma15) xor gamma15 => gamma15 is gone
-        tmp = xor(tmp.as_slice(), &s[24..26]); // (gamma0 xor gamma1 xor gamma2 xor gamma3 xor gamma12) xor gamma12 => gamma12 is gone
-        tmp = xor(tmp.as_slice(), &s[6..8]); // (gamma0 xor gamma1 xor gamma2 xor gamma3) xor gamma3 => gamma3 is gone
-        tmp = xor(tmp.as_slice(), &s[4..6]); // (gamma0 xor gamma1 xor gamma2) xor gamma2 => gamma2 is gone
-        tmp = xor(tmp.as_slice(), &s[2..4]); // (gamma0 xor gamma1) xor gamma1 => gamma1 is gone, only gamma0 is left
-        (&mut s[..2]).copy_from_slice(tmp.as_slice()); // push gamma0
-
+        s |= x << 4; // gamma15 || .. || gamma1
+        let sum = x >> 60; // gamma0 ^ gamma1 ^ gamma2 ^ gamma3 ^ gamma12 ^ gamma15
+        // gamma1 ^ gamma2 ^ gamma3 ^ gamma12 ^ gamma15
+        let gamma0 = sum ^ (x & 0xf) ^ ((x >> 4) & 0xf) ^ ((x >> 8) & 0xf) ^ ((x >> 44) & 0xf) ^ ((x >> 56) & 0xf);
+        s |= gamma0;
+        
         s
     }
 
-    pub fn psy_pow(x: &[u8], n: i32) -> State {
-        let mut tmp = [0u8; 32];
-        (&mut tmp[..]).copy_from_slice(x);
+    pub fn psy_pow(x: State, n: i32) -> State {
+        let mut tmp = x;
 
         if n >= 0 {
             for _ in 0..n {
-                tmp = Self::psy(&tmp);
+                tmp = Self::psy(tmp);
             }
         } else {
             for _ in 0..(-n) {
-                tmp = Self::psy_rev(&tmp);
+                tmp = Self::psy_rev(tmp);
             }
         }
 
         tmp
     }
 
-    fn output_transformation(s: &[u8], h: &[u8], m: &[u8]) -> State {
-        let mut res;
-
+    fn output_transformation(s: State, h: State, m: State) -> State {
         // h_i = psy^61(h_i-1 xor psy(m xor psy^12(s)))
-        res = Self::psy_pow(s, 12);
-        res = Self::psy(xor(m, &res).as_slice());
-        let tmp = xor(h, &res);
-        res.copy_from_slice(tmp.as_slice());
-        res = Self::psy_pow(&res, 61);
-
-        res 
-    }
-}
-
-#[cfg(test)]
-mod test {
-    #[test]
-    fn naive_compression_test() {
-        let h = [
-            0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0,
-            1, 2, 3,
-        ];
-        let m = [
-            3, 1, 3, 0, 2, 3, 0, 1, 3, 1, 3, 0, 2, 3, 0, 1, 3, 1, 3, 0, 2, 3, 0, 1, 3, 1, 3, 0, 2,
-            3, 0, 1,
-        ];
-
-        super::GostHash::compress(&h, &m);
-    }
-
-    #[test]
-    fn phi_print() {
-        for i in 1..33 {
-            println!("{}", super::GostHash::phi(i));
-        }
+        Self::psy_pow(h ^ Self::psy(m ^ Self::psy_pow(s, 12)), 61)
     }
 }
