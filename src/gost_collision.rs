@@ -15,7 +15,7 @@ type HalfKey = u32;
 type Block = u16;
 type Message = State;
 
-static SEEKERS: u32 = 16;
+static SEEKERS: u32 = 8;
 
 pub mod utils {
     use std::convert::TryInto;
